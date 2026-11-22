@@ -1,155 +1,100 @@
-# =============================================================================
-#  project.toml · YOUR PROJECT SETTINGS
-#  This is the only file you edit. pipeline.py reads it and does the rest.
-#
-#  Rules of the format:
-#   - Text goes in "double quotes". Lists go in [square brackets].
-#   - Lines starting with # are notes for people; the computer ignores them.
-#   - SQL that spans several lines goes between triple quotes: """ ... """
-#
-#  This example: NYC 311 heat and hot water complaints from the last 7 days.
-#  To see any API's columns before filling this in, run:  python pipeline.py --preview
-# =============================================================================
-
 [project]
-name = "heat_complaints"        # a short name: lowercase, no spaces
+name = "nyc_ems"
 
-
-# -----------------------------------------------------------------------------
-# 1. SOURCE: where the data comes from
-# -----------------------------------------------------------------------------
 [source]
-type = "socrata"                # "socrata" for NYC Open Data and most city portals,
-                                # "worldbank" for the World Bank (see examples/)
-
-# The API address: on the dataset's page, click Export (or API) and copy the
-# "API Endpoint" ending in .json
-url = "https://data.cityofnewyork.us/resource/erm2-nwe9.json"
-
-# The columns to keep (use the names that --preview shows you)
-columns = ["unique_key", "created_date", "complaint_type", "borough", "incident_zip"]
-
-# Optional: only some rows. Leave as "" to take everything.
-filter = "complaint_type = 'HEAT/HOT WATER'"
-
-# Optional: only recent rows. Remove these two lines to take all dates.
-date_column = "created_date"
-days_back = 7
-
-max_rows = 20000                # a safety limit on how many rows to fetch
-
-
-# -----------------------------------------------------------------------------
-# 2. CHECKS: the rules that define "ready" (at least five)
-#    The data arrives in a table called raw.
-#    Each check is SQL that COUNTS PROBLEM ROWS. 0 problems = PASS.
-#    If any check fails, the run stops and nothing is published.
-# -----------------------------------------------------------------------------
-[[checks]]
-name = "enough rows arrived"
-why  = "a near-empty download means something went wrong at the source"
-sql  = "SELECT CASE WHEN count(*) >= 100 THEN 0 ELSE 1 END FROM raw"
+type = "socrata"
+# Sort before applying the row cap. The second key breaks timestamp ties.
+url = "https://data.cityofnewyork.us/resource/76xm-jjuj.json"
+columns = [
+  "incident_id", "incident_datetime", "borough", "zipcode",
+  "dispatch_response_seconds_qy", "incident_travel_tm_seconds_qy",
+  "incident_response_seconds_qy", "valid_incident_rspns_time_indc"
+]
+filter = "incident_datetime >= '2023-10-01T00:00:00'"
+max_rows = 200
 
 [[checks]]
-name = "unique_key is never missing or repeated"
-why  = "each complaint must be counted exactly once"
-sql  = "SELECT count(*) - count(DISTINCT unique_key) FROM raw"
-
-[[checks]]
-name = "borough is one of the five (or UNSPECIFIED)"
-why  = "a misspelled borough would split one borough's totals in two"
-sql  = """
-SELECT count(*) FROM raw
-WHERE borough NOT IN ('BRONX', 'BROOKLYN', 'MANHATTAN', 'QUEENS', 'STATEN ISLAND', 'UNSPECIFIED')
+name = "200 incidents and all five NYC boroughs"
+why = "A short sample or missing borough would limit a five-borough comparison."
+sql = """
+SELECT CASE WHEN count(*) = 200
+             AND count(DISTINCT borough_name) FILTER (
+                 WHERE borough_name IN ('BRONX', 'BROOKLYN', 'MANHATTAN', 'QUEENS', 'STATEN ISLAND')
+             ) = 5
+            THEN 0 ELSE 1 END
+FROM (
+    SELECT CASE WHEN borough = 'RICHMOND / STATEN ISLAND' THEN 'STATEN ISLAND'
+                ELSE borough END AS borough_name
+    FROM raw
+) AS normalized
 """
 
 [[checks]]
-name = "no complaints dated in the future"
-why  = "a future date means a data entry error"
-sql  = "SELECT count(*) FROM raw WHERE created_date > now()::TIMESTAMP + INTERVAL 1 DAY"
+name = "Incident IDs are present and unique"
+why = "Each call must be counted once."
+sql = "SELECT count(*) - count(DISTINCT nullif(trim(CAST(incident_id AS VARCHAR)), '')) FROM raw"
 
 [[checks]]
-name = "fresh: newest complaint is under 3 days old"
-why  = "if the city stops updating, we should notice, not publish stale data"
-sql  = "SELECT CASE WHEN max(created_date) >= now()::TIMESTAMP - INTERVAL 3 DAY THEN 0 ELSE 1 END FROM raw"
+name = "Valid response times are present and nonnegative"
+why = "A record marked valid needs a usable duration for the response-time comparison."
+sql = """
+SELECT count(*) FROM raw WHERE valid_incident_rspns_time_indc = 'Y'
+AND (try_cast(incident_response_seconds_qy AS BIGINT) IS NULL
+     OR try_cast(incident_response_seconds_qy AS BIGINT) < 0)
+"""
 
+[[checks]]
+name = "Response validity flags are Y or N"
+why = "An unexpected or missing flag makes it unclear whether to use the response time."
+sql = """
+SELECT count(*) FROM raw WHERE valid_incident_rspns_time_indc IS NULL
+OR valid_incident_rspns_time_indc NOT IN ('Y','N')
+"""
 
-# -----------------------------------------------------------------------------
-# 3. TABLES: what to build and publish to MotherDuck (at least three)
-#    Each is a SELECT on raw, or on a table listed above it.
-#    Start with one clean table, then build analysis tables from it:
-#    a trend over time, a summary of key metrics, and a ranking.
-#    Next week's AI app answers questions from these tables.
-# -----------------------------------------------------------------------------
+[[checks]]
+name = "The sample reaches October 2023 or later"
+why = "A sample entirely before the study period would be too old for this project."
+sql = """
+SELECT CASE WHEN max(try_cast(incident_datetime AS TIMESTAMP)) >= DATE '2023-10-01'
+THEN 0 ELSE 1 END FROM raw
+"""
 
-# (a) The clean table: one row per complaint
 [[tables]]
-name = "heat_complaints"
-sql  = """
-SELECT unique_key, created_date, created_date::DATE AS created_day, borough, incident_zip
+name = "ems_nyc_sample"
+sql = """
+SELECT CAST(incident_id AS VARCHAR) AS incident_id,
+       try_cast(incident_datetime AS TIMESTAMP) AS incident_datetime,
+       CASE WHEN borough = 'RICHMOND / STATEN ISLAND' THEN 'STATEN ISLAND'
+     ELSE borough END AS borough,
+CAST(zipcode AS VARCHAR) AS zipcode,
+       try_cast(dispatch_response_seconds_qy AS BIGINT) AS dispatch_response_seconds_qy,
+       try_cast(incident_travel_tm_seconds_qy AS BIGINT) AS incident_travel_tm_seconds_qy,
+       try_cast(incident_response_seconds_qy AS BIGINT) AS incident_response_seconds_qy,
+       valid_incident_rspns_time_indc
 FROM raw
-WHERE borough <> 'UNSPECIFIED'      -- can't be placed in a borough: dropped on purpose
 """
 
-# (b) A trend: complaints per borough per day
 [[tables]]
-name = "heat_by_borough_day"
-sql  = """
-SELECT borough, created_day, count(*) AS complaints
-FROM heat_complaints
-GROUP BY borough, created_day
-"""
-
-# (c) Key metrics: one row per borough
-[[tables]]
-name = "heat_borough_summary"
-sql  = """
-SELECT borough,
-       count(*)                                             AS total_complaints,
-       round(count(*) / count(DISTINCT created_day), 1)     AS avg_per_day,
-       round(100.0 * count(*) / sum(count(*)) OVER (), 1)   AS pct_of_city,
-       count(DISTINCT incident_zip)                         AS zip_codes_affected
-FROM heat_complaints
-GROUP BY borough
-ORDER BY total_complaints DESC
-"""
-
-# (d) A ranking: the 20 ZIP codes with the most complaints
-[[tables]]
-name = "heat_top_zips"
-sql  = """
-SELECT incident_zip, borough, count(*) AS complaints
-FROM heat_complaints
-WHERE incident_zip IS NOT NULL
-GROUP BY incident_zip, borough
-ORDER BY complaints DESC
-LIMIT 20
-"""
-
-
-# -----------------------------------------------------------------------------
-# 4. REPORT (optional): questions the pipeline answers at the end of each run
-#    Each is a plain-English question and the SQL that answers it, using the
-#    tables above. The answers print in the run log. Try your findings here!
-# -----------------------------------------------------------------------------
-[[report]]
-question = "Which borough has the most heat complaints?"
+name = "ems_borough_summary"
 sql = """
-SELECT borough, total_complaints, avg_per_day, pct_of_city
-FROM heat_borough_summary
-ORDER BY total_complaints DESC
+SELECT borough, count(*) AS sample_incidents,
+       count(*) FILTER (WHERE valid_incident_rspns_time_indc = 'Y') AS valid_incidents,
+       round(median(incident_response_seconds_qy)
+             FILTER (WHERE valid_incident_rspns_time_indc = 'Y') / 60.0, 2) AS median_response_min
+FROM ems_nyc_sample GROUP BY borough
 """
 
-[[report]]
-question = "Which five ZIP codes are hardest hit?"
-sql = "SELECT incident_zip, borough, complaints FROM heat_top_zips ORDER BY complaints DESC LIMIT 5"
-
-[[report]]
-question = "How many complaints came in each day, citywide?"
+[[tables]]
+name = "ems_borough_day"
 sql = """
-SELECT created_day, sum(complaints)::INT AS complaints
-FROM heat_by_borough_day
-GROUP BY created_day
-ORDER BY created_day
+SELECT CAST(incident_datetime AS DATE) AS incident_day, borough, count(*) AS sample_incidents
+FROM ems_nyc_sample GROUP BY incident_day, borough
 """
 
+[[report]]
+question = "How many sampled incidents and valid response times does each borough have, and what is its median response in minutes?"
+sql = "SELECT * FROM ems_borough_summary ORDER BY median_response_min DESC NULLS LAST, borough"
+
+[[report]]
+question = "How many incidents in the sample fall on each date?"
+sql = "SELECT incident_day, sum(sample_incidents) AS sample_incidents FROM ems_borough_day GROUP BY incident_day ORDER BY incident_day"
