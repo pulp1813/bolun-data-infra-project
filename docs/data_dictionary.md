@@ -1,77 +1,92 @@
-# Data dictionary: NYC EMS incident response
+# Data dictionary · EXAMPLE (NYC 311 heat complaints, class demo)
 
-## Source and refresh schedule
+<!-- A filled-in version of data_dictionary.md. Example values are illustrative. -->
 
-**Source:** [FDNY EMS Incident Dispatch Data](https://data.cityofnewyork.us/Public-Safety/EMS-Incident-Dispatch-Data/76xm-jjuj/about_data) · [API documentation](https://dev.socrata.com/foundry/data.cityofnewyork.us/76xm-jjuj)
+## Part 1 · About the project
 
-**Refreshed:** GitHub Actions is scheduled to run daily at 11:17 UTC (6:17 a.m. EST / 7:17 a.m. EDT). FDNY updates the source annually. Each successful EMS run replaces all three tables using a sample of 200 incidents dated October 1, 2023 or later. If validation fails, the previous tables stay in place.
+**Project:** Heat and hot water complaints made to NYC 311 in the last 7 days, by borough and ZIP code.
 
-## Table 1: EMS incident sample
+**Source:** NYC Open Data, 311 Service Requests (dataset erm2-nwe9), https://data.cityofnewyork.us/resource/erm2-nwe9.json
 
-**Table name on MotherDuck:** `course.main.ems_nyc_sample`
+**Refreshed:** Daily at about 6 AM New York time by GitHub Actions. Each run replaces every table with the last 7 days of complaints, so older days drop off.
 
-**One row is:** One sampled EMS incident, identified by `incident_id`.
+**Removed on purpose:** Complaints with borough "UNSPECIFIED", because they can't be placed in a borough. Only complaint type "HEAT/HOT WATER" is kept.
 
-**Removed on purpose:** The API excludes incidents before October 1, 2023 and returns at most 200 records. Incidents with invalid response times remain in the table so they are still counted. The source label `RICHMOND / STATEN ISLAND` is standardized to `STATEN ISLAND`.
+---
 
-### Columns
+## Part 2 · The tables
 
-| Column | Type | What it means | Units or allowed values | Example |
-|---|---|---|---|---|
-| `incident_id` | VARCHAR | Unique identifier for the incident. | Text ID | `78327772` |
-| `incident_datetime` | TIMESTAMP | When the incident was created in the EMS dispatch system. | Date and time | `2023-10-01 00:00:17` |
-| `borough` | VARCHAR | Borough where the incident occurred. | BRONX, BROOKLYN, MANHATTAN, QUEENS, STATEN ISLAND | `BRONX` |
-| `zipcode` | VARCHAR | ZIP code of the incident location, when available. | Five-digit text code | `10467` |
-| `dispatch_response_seconds_qy` | BIGINT | Time from incident creation to the first unit assignment. | Seconds | 20 |
-| `incident_travel_tm_seconds_qy` | BIGINT | Time from the first unit assignment to the first arrival on scene. | Seconds | 438 |
-| `incident_response_seconds_qy` | BIGINT | Total time from incident creation to the first arrival on scene. | Seconds | 458 |
-| `valid_incident_rspns_time_indc` | VARCHAR | Whether FDNY considers the total response time valid. | Y = valid; N = invalid | `Y` |
+### Table 1: `course.main.heat_complaints`
 
-## Table 2: Borough response summary
+**What it is:** The clean table
 
-**Table name on MotherDuck:** `course.main.ems_borough_summary`
+**One row is:** one complaint
 
-**One row is:** One borough across the entire sample. This table has five rows.
-
-**Source:** Calculated from `course.main.ems_nyc_sample`.
-
-**Removed on purpose:** All incidents count toward `sample_incidents`. Only incidents flagged `Y` count toward `valid_incidents` and the median response time.
-
-### Columns
+**Built from:** raw
 
 | Column | Type | What it means | Units or allowed values | Example |
 |---|---|---|---|---|
-| `borough` | VARCHAR | Borough represented by this row. | One of the five NYC boroughs | `BROOKLYN` |
-| `sample_incidents` | BIGINT | All sampled incidents in the borough. | Incident count | 42 |
-| `valid_incidents` | BIGINT | Sampled incidents with a valid total response time. | Incident count | 37 |
-| `median_response_min` | DOUBLE | Median total response time among valid incidents, converted to minutes and rounded to two decimal places. | Minutes | 12.57 |
+| unique_key | text | The city's ID for the complaint | unique; never repeated | 63012345 |
+| created_date | timestamp | When the complaint was made | New York time | 2026-11-15 21:42:00 |
+| created_day | date | The day the complaint was made | date only | 2026-11-15 |
+| borough | text | Borough of the building | BRONX, BROOKLYN, MANHATTAN, QUEENS, STATEN ISLAND | BRONX |
+| incident_zip | text | ZIP code of the building | 5 digits; can be empty | 10467 |
 
-## Table 3: Daily incident counts by borough
+### Table 2: `course.main.heat_by_borough_day`
 
-**Table name on MotherDuck:** `course.main.ems_borough_day`
+**What it is:** A trend
 
-**One row is:** One borough on one calendar date represented in the sample.
+**One row is:** one borough on one day
 
-**Source:** Calculated from `course.main.ems_nyc_sample` using the date portion of `incident_datetime`.
-
-**Removed on purpose:** All sampled incidents are counted, including those with invalid response times. A borough and date with no sampled incidents has no row; this does not mean no EMS incidents occurred there.
-
-### Columns
+**Built from:** heat_complaints
 
 | Column | Type | What it means | Units or allowed values | Example |
 |---|---|---|---|---|
-| `incident_day` | DATE | Date the incident was created in the dispatch system. | YYYY-MM-DD | `2023-10-01` |
-| `borough` | VARCHAR | Borough represented by this row. | One of the five NYC boroughs | `MANHATTAN` |
-| `sample_incidents` | BIGINT | Number of sampled incidents in this borough on this date. | Incident count | 57 |
+| borough | text | Borough | the five boroughs | BROOKLYN |
+| created_day | date | Day | last 7 days | 2026-11-15 |
+| complaints | integer | Heat complaints in that borough that day | count | 412 |
 
-## What this data can't tell you
+### Table 3: `course.main.heat_borough_summary`
 
-1. All 200 sampled incidents occurred on October 1, 2023. They do not represent every NYC incident that day and cannot establish a trend over time.
-2. Only 188 of 200 incidents had valid total response times. To calculate a citywide sample median, use those 188 incident records; averaging the five borough medians does not give the citywide median.
-3. These tables contain no neighborhood income, traffic, or call severity data. They can show where response times differed in the sample, but they cannot explain why.
+**What it is:** Key metrics
 
-## Example questions it can answer
+**One row is:** one borough, over the last 7 days
 
-1. How many sampled incidents had a valid total response time, and what percentage of the sample did they represent?
-2. Which borough had the highest median total response time, and how many valid incidents contributed to that median?
-3. How many sampled incidents occurred in each borough on October 1, 2023?
+**Built from:** heat_complaints
+
+| Column | Type | What it means | Units or allowed values | Example |
+|---|---|---|---|---|
+| borough | text | Borough | the five boroughs | BRONX |
+| total_complaints | integer | All heat complaints in the 7 days | count | 3,420 |
+| avg_per_day | number | Average complaints per day | count per day, 1 decimal | 488.6 |
+| pct_of_city | number | This borough's share of all complaints in the city | percent, 0–100; the five add to 100 | 31.4 |
+| zip_codes_affected | integer | ZIP codes with at least one complaint | count | 25 |
+
+### Table 4: `course.main.heat_top_zips`
+
+**What it is:** A ranking
+
+**One row is:** one ZIP code (top 20 only)
+
+**Built from:** heat_complaints
+
+| Column | Type | What it means | Units or allowed values | Example |
+|---|---|---|---|---|
+| incident_zip | text | ZIP code | 5 digits | 10467 |
+| borough | text | Borough the ZIP is in | the five boroughs | BRONX |
+| complaints | integer | Heat complaints in that ZIP in the 7 days | count | 298 |
+
+---
+
+## Part 3 · What this data can't tell you
+
+1. Only the last 7 days. It can't show last winter or compare years.
+2. A complaint is a call, not a confirmed problem. Several tenants in one building can complain about the same outage.
+3. Counts aren't adjusted for population or number of buildings, so bigger boroughs will naturally have more.
+
+## Part 4 · Example questions it can answer
+
+1. Which borough had the most heat complaints this week? (heat_borough_summary)
+2. What share of complaints came from the Bronx? (heat_borough_summary)
+3. Which five ZIP codes were hardest hit? (heat_top_zips)
+4. Were complaints rising or falling over the week in Brooklyn? (heat_by_borough_day)
